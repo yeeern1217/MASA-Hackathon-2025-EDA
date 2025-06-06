@@ -1,0 +1,2269 @@
+---
+title: "MASA Hackathon 2025: EDA codes"
+author:
+  - WONG ZHI ZHONG
+  - NUR HAZIQAH BINTI MOHAMMAD
+  - KOH YU XUAN
+  - DANIEL LAM THEEN SEONG
+  - CHENG YEE ERN
+format: 
+  html:
+    toc: true
+    self-contained: true
+    theme: cosmo
+editor: visual
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE)
+rm(list = ls())
+```
+
+# Load packages
+
+```{r}
+library(tidyverse)
+library(fpp2)
+library(tidymodels)
+library(GGally)
+library(caret)
+library(naniar)
+library(gridExtra)
+library(gt)
+library(modelsummary)
+library(truncdist)
+```
+
+# Import Dataset
+
+## Datasets by MASA
+
+```{r}
+df_birth <- read_csv("datasets/birth.csv")
+df_employment <- read_csv("datasets/employment.csv")
+df_epf_contribution_rates <- read_csv("datasets/epf contribution rates.csv")
+df_epf_savings <- read_csv("datasets/epf savings.csv")
+df_population <- read_csv("datasets/population.csv")
+df_wage <- read_csv("datasets/wage.csv")
+```
+
+## External Datasets
+
+<div>
+
+#### Sources
+
+-   Household size: Khazanah Reearch Institute <https://www.krinstitute.org/assets/contentMS/img/template/editor/Part1_KRI_SOH_2018.pdf>
+
+-   Household income: DOSM\
+    <https://open.dosm.gov.my/data-catalogue/hh_income>
+
+-   EPF:\
+    <https://archive.data.gov.my/data/dataset/employees-provident-fund>
+
+-   GDP growth: World Bank Open Data\
+    <https://data.worldbank.org/indicator/NY.GDP.MKTP.KD.ZG?locations=MY>
+
+-   Inflation: World Bank Open Data\
+    <https://data.worldbank.org/indicator/FP.CPI.TOTL.ZG?locations=MY>
+
+-   Male mortality: World Bank Open Data\
+    <https://data.worldbank.org/indicator/SP.DYN.AMRT.MA?locations=MY>
+
+-   Female mortality: World Bank Open Data\
+    <https://data.worldbank.org/indicator/SP.DYN.AMRT.FE?locations=MY>
+
+-   Fertility: World Bank Open Data\
+    <https://data.worldbank.org/indicator/SP.DYN.TFRT.IN?locations=MY>
+
+</div>
+
+```{r}
+household_income <-  read_csv("datasets/hh_income.csv")
+df_epf_data <-  read_csv("datasets/epf data.csv")
+df_gdp_growth <- read_csv("datasets/gdp growth.csv")
+df_inflation <- read_csv("datasets/inflation.csv", skip = 4)
+df_male_mortality <- read_csv("datasets/male mortality.csv", skip = 4)
+df_female_mortality <- read_csv("datasets/female mortality.csv", skip = 4)
+df_fertility <- read_csv("datasets/fertility.csv", skip = 4)
+```
+
+# Synthetic Income Data
+
+```{r}
+# Load dataset
+income_data <- df_wage
+colnames(income_data)
+```
+
+```{r}
+# Preprocess dataset
+income_data <- income_data %>%
+  filter(Year == 2022, Sex != "Total", `Age group` != "Total")
+
+income_data <- income_data %>%
+  rename(
+    Number_of_recipients_000 = `Number of recipients ('000)`,
+    Median_monthly_salaries_wages_of_employee_RM = `Median monthly salaries & wages of employees (RM)`,
+    Mean_monthly_salaries_wages_of_employee_RM = `Mean monthly salaries & wages of employee (RM)`,
+    Age_group = `Age group`
+  )
+
+# Convert to numeric
+income_data$Number_of_recipients_000 <- as.numeric(income_data$Number_of_recipients_000)
+income_data$Mean_monthly_salaries_wages_of_employee_RM <- as.numeric(
+  gsub(",", "", income_data$Mean_monthly_salaries_wages_of_employee_RM)
+)
+income_data$Median_monthly_salaries_wages_of_employee_RM <- as.numeric(
+  gsub(",", "", income_data$Median_monthly_salaries_wages_of_employee_RM)
+)
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(42)
+
+# Sample income_data (replace with your actual income_data)
+income_data <- data.frame(
+  Sex = c("Female", "Female", "Female", "Female", "Female", "Female",
+          "Male", "Male", "Male", "Male", "Male", "Male"),
+  Age_group = c("15-19 years", "20-29 years", "30-39 years", "40-49 years", "50-59 years", "60-69 years",
+                "15-19 years", "20-29 years", "30-39 years", "40-49 years", "50-59 years", "60-69 years"),
+  Number_of_recipients_000 = c(73, 1289, 1380, 904, 412, 42,
+                               204, 1720, 1810, 1268, 797, 100),
+  Mean_monthly_salaries_wages_of_employee_RM = c(1800, 3000, 4000, 5000, 4500, 3500,
+                                                2000, 3500, 5000, 6000, 5500, 4000),
+  Median_monthly_salaries_wages_of_employee_RM = c(1500, 2500, 3500, 4000, 3800, 3000,
+                                                  1700, 3000, 4500, 5000, 4500, 3500)
+)
+
+# Calculate the proportions for each sex and age group
+age_sex_proportions <- income_data %>%
+  select(Sex, Age_group, Number_of_recipients_000) %>%
+  mutate(Proportion = Number_of_recipients_000 / sum(Number_of_recipients_000))
+
+# Define a function to extract minimum and maximum age from the age group text
+parse_age_group <- function(age_group) {
+  if (grepl("-", age_group)) {
+    parts <- unlist(strsplit(gsub(" years", "", age_group), "-"))
+    if (length(parts) == 2) {
+      return(as.integer(parts))
+    }
+  }
+  return(c(0, 100))  # Fallback if parsing fails
+}
+
+# Function to calculate log-normal distribution parameters from mean and median
+calc_log_normal_params <- function(mean, median) {
+  # Validate inputs
+  if (mean < median) stop("Mean must be >= median for log-normal distribution")
+
+  # Calculate mean of underlying normal distribution (mu_X)
+  mu_X <- log(median)
+
+  # Calculate standard deviation (sigma) of the underlying normal distribution
+  sigma <- sqrt(log(mean^2 / median^2 + 1))
+
+  # Cap sigma to reduce extreme values
+  sigma <- min(sigma, 0.5)
+
+  return(list(mu_X = mu_X, sigma = sigma))
+}
+
+# Generate population based on proportions
+num_individuals <- 10000
+population_data <- data.frame(
+  ID = integer(),
+  Sex = character(),
+  Age = integer(),
+  Salary = numeric()
+)
+
+min_salary_threshold <- 500  # Minimum salary (RM)
+max_salary_threshold <- 50000  # Maximum salary (RM)
+
+for (i in 1:nrow(age_sex_proportions)) {
+  n_individuals <- round(age_sex_proportions$Proportion[i] * num_individuals)
+  age_range <- parse_age_group(age_sex_proportions$Age_group[i])
+
+  # Calculate log-normal distribution parameters
+  params <- calc_log_normal_params(
+    income_data$Mean_monthly_salaries_wages_of_employee_RM[i],
+    income_data$Median_monthly_salaries_wages_of_employee_RM[i]
+  )
+
+  # Generate group data
+  group_data <- data.frame(
+    ID = seq(from = nrow(population_data) + 1, by = 1, length.out = n_individuals),
+    Sex = rep(age_sex_proportions$Sex[i], n_individuals),
+    Age = sample(age_range[1]:age_range[2], n_individuals, replace = TRUE),
+    Salary = pmax(
+      min_salary_threshold,
+      pmin(
+        max_salary_threshold,
+        round(rlnorm(n_individuals, meanlog = params$mu_X, sdlog = params$sigma))
+      )
+    )
+  )
+
+  # Optional: Use truncated log-normal distribution (uncomment to use)
+   group_data <- data.frame(
+     ID = seq(from = nrow(population_data) + 1, by = 1, length.out = n_individuals),
+     Sex = rep(age_sex_proportions$Sex[i], n_individuals),
+     Age = sample(age_range[1]:age_range[2], n_individuals, replace = TRUE),
+     Salary = pmax(
+       min_salary_threshold,
+       round(rtrunc(
+         n_individuals, "lnorm",
+         meanlog = params$mu_X, sdlog = params$sigma,
+         a = min_salary_threshold, b = max_salary_threshold
+       ))
+     )
+   )
+
+  # Append the group data to the population data
+  population_data <- rbind(population_data, group_data)
+}
+
+# Summarize salaries by Sex and Age_group for validation
+salary_summary <- population_data %>%
+  mutate(Age_group = case_when(
+    Age >= 15 & Age <= 19 ~ "15-19 years",
+    Age >= 20 & Age <= 29 ~ "20-29 years",
+    Age >= 30 & Age <= 39 ~ "30-39 years",
+    Age >= 40 & Age <= 49 ~ "40-49 years",
+    Age >= 50 & Age <= 59 ~ "50-59 years",
+    Age >= 60 & Age <= 69 ~ "60-69 years",
+    TRUE ~ "Other"
+  )) %>%
+  group_by(Sex, Age_group) %>%
+  summarise(
+    MinSalary = min(Salary),
+    MaxSalary = max(Salary),
+    MeanSalary = mean(Salary),
+    MedianSalary = median(Salary),
+    .groups = "drop"
+  )
+
+print(salary_summary)
+```
+
+```{r}
+# Define file path
+file_path <- "datasets/synthetic_income_data.csv"
+
+# Write CSV only if it doesn't exist
+if (!file.exists(file_path)) {
+  write.csv(population_data, file_path, row.names = FALSE)
+}
+
+# Read the CSV regardless of whether it was just written or already exists
+df_income <- readr::read_csv(file_path)
+```
+
+# Variable Analysis
+
+## Demography
+
+```{r}
+# Correct the age group labels
+df_population_clean <- df_population %>%
+  mutate(`age group` = case_when(
+    `age group` == "5-Sep" ~ "5-9",       # Replace "5-Sep" with "5-9"
+    `age group` == "Oct-14" ~ "10-14",   # Replace "Oct-14" with "10-14"
+    TRUE ~ `age group`                   # Keep other values unchanged
+  ))
+
+# Create a new column '60+' by summing up relevant age groups for each year
+df_population_60 <- df_population_clean %>%
+  mutate(`60+` = ifelse(
+    `age group` %in% c("60-64", "65-69", "70-74", "75-79", "80-84", "85+", "70+"), 
+    population, 
+    0
+  )) %>%
+  group_by(year) %>%
+  summarise(`60+` = sum(`60+`)) %>%
+  ungroup()
+
+# Filter data for the years 1970 to 2024 and extract "overall" population
+df_population_overall <- df_population_clean %>%
+  filter(year >= 1970 & year <= 2024 & `age group` == "overall") %>%
+  select(year, population) %>% 
+  rename(population_overall = population)
+
+# Merge the datasets
+df_population_modified <- df_population_overall %>%
+  left_join(df_population_60, by = "year") %>%
+  rename(population_60_plus = `60+`) %>%
+  select(year, population_overall, population_60_plus)
+
+df_birth <- df_birth %>%
+  mutate(`number of live births` = `number of live births` / 1000)
+
+df_employment <- df_employment %>%
+  rename(year = date)
+
+df_demographic <- df_population_modified %>%
+  left_join(df_birth %>% select(year, `number of live births`), by = "year") %>%
+  rename(births = `number of live births`) %>% 
+  left_join(df_employment, by = "year") %>% 
+  filter(year >= 2000)
+```
+
+```{r}
+ts_workforce <- ts(df_demographic$`total labour force ('000)`, start = 2000, end = 2023, frequency = 1)
+ts_60_plus <- ts(df_demographic$`population_60_plus`, start = 2000, end = 2023, frequency = 1)
+ts_employed <- ts(df_demographic$`employed ('000)`, start = 2000, end = 2023, frequency = 1)
+ts_births <- ts(df_demographic$births, start = 2000, end = 2023, frequency = 1)
+
+autoplot(ts_workforce, series = "Workforce") +
+  autolayer(ts_60_plus, series = "Population 60+") +
+  autolayer(ts_employed, series = "Employed") +
+  autolayer(ts_births, series = "Births") +
+  labs(
+    title = "Demographic Trends in Malaysia (2000-2023)",
+    x = "Year",
+    y = "Population (in thousands)"
+  ) +
+  scale_color_manual(
+    values = c("Workforce" = "blue",
+               "Population 60+" = "red",
+               "Employed" = "green",
+               "Births" = "purple")
+  ) +
+  theme_minimal()
+```
+
+## Salary
+
+### Trend Analysis
+
+```{r}
+# Filter only rows where Age group is "Total" and Sex is "Total"
+df_total_only <- subset(df_wage, `Age group` == "Total" & Sex == "Total")
+
+# Convert Year to factor
+df_total_only$Year <- as.factor(df_total_only$Year)
+
+# Multiply recipients by 1000
+df_total_only$Recipients <- df_total_only$`Number of recipients ('000)` * 1000
+
+# Prepare salary data in long format
+df_wage_long <- df_total_only %>%
+  select(Year,
+         `Median monthly salaries & wages of employees (RM)`,
+         `Mean monthly salaries & wages of employee (RM)`) %>%
+  rename(Median_Wage = `Median monthly salaries & wages of employees (RM)`,
+         Mean_Wage = `Mean monthly salaries & wages of employee (RM)`) %>%
+  pivot_longer(cols = c(Median_Wage, Mean_Wage),
+               names_to = "Metric", values_to = "Wage")
+
+# Plot Median & Mean Salary
+ggplot(df_wage_long, aes(x = Year, y = Wage, color = Metric, group = Metric)) +
+geom_line(size = 1.2) +
+geom_point(size = 2) +
+labs(title = "Median & Mean Monthly Salaries of Malaysians", x = "Year", y = "Wage (RM)") +
+theme_minimal()
+```
+
+```{r}
+# Plot Number of Recipients
+ggplot(df_total_only, aes(x = Year, y = Recipients, group = 1)) +
+geom_line(color = "darkgreen", size = 1.2) +
+geom_point(color = "darkgreen", size = 2) +
+labs(title = "Number of Wage Recipients in Malaysia", x = "Year", y = "Number of Recipients") +
+theme_minimal()
+```
+
+### Age Group Analysis
+
+```{r}
+# Calculate average salary across all years by age group
+df_age_wage_avg <- df_wage %>%
+  filter(Sex == "Total", `Age group` != "Total") %>%
+  group_by(`Age group`) %>%
+  summarise(
+    Median = mean(`Median monthly salaries & wages of employees (RM)`, na.rm = TRUE),
+    Mean = mean(`Mean monthly salaries & wages of employee (RM)`, na.rm = TRUE)
+  )
+
+# Reshape to long format
+df_age_wage_avg_long <- pivot_longer(df_age_wage_avg, cols = c(Median, Mean),
+                                       names_to = "Type", values_to = "Wage")
+
+# Plot
+ggplot(df_age_wage_avg_long, aes(x = `Age group`, y = Wage, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Average Median vs Mean Salary by Age Group (All Years)",
+       x = "Age Group", y = "RM") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+df_age_recipients_sum <- df_wage %>%
+  filter(Sex == "Total", `Age group` != "Total") %>%
+  group_by(`Age group`) %>%
+  summarise(
+    Total_Recipients = sum(`Number of recipients ('000)`, na.rm = TRUE) * 1000  # Convert to individuals
+  )
+
+ggplot(df_age_recipients_sum, aes(x = `Age group`, y = Total_Recipients)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Total Number of Recipients by Age Group (All Years)",
+       x = "Age Group", y = "Total Recipients") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Gender Group Analysis
+
+```{r}
+# Mean salary by year and gender
+df_gender_trend <- df_wage %>%
+  filter(Sex != "Total", `Age group` == "Total") %>%
+  group_by(Year, Sex) %>%
+  summarise(
+    Mean_Salary = mean(`Mean monthly salaries & wages of employee (RM)`, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Plot
+ggplot(df_gender_trend, aes(x = Year, y = Mean_Salary, color = Sex, group = Sex)) +
+  geom_line(size = 1.2) +
+  labs(title = "Trend of Mean Salary by Gender Over Years",
+       x = "Year", y = "Mean Salary (RM)") +
+  theme_minimal()
+```
+
+```{r}
+# Sum number of recipients by gender and age group
+df_gender_recipients <- df_wage %>%
+  filter(`Age group` != "Total", Sex != "Total") %>%
+  group_by(Sex, `Age group`) %>%
+  summarise(
+    Total_Recipients = sum(`Number of recipients ('000)`, na.rm = TRUE) * 1000,
+    .groups = "drop"
+  )
+
+# Plot
+ggplot(df_gender_recipients, aes(x = `Age group`, y = Total_Recipients, fill = Sex)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Total Number of Recipients by Gender and Age Group (All Years)",
+       x = "Age Group", y = "Total Recipients") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Salary Skewness
+
+```{r}
+df_skew <- df_wage %>%
+  filter(Year == 2010, Sex == "Total", `Age group` != "Total") %>%
+  mutate(
+    Gap = `Mean monthly salaries & wages of employee (RM)` - `Median monthly salaries & wages of employees (RM)`,
+    Skew_Ratio = `Mean monthly salaries & wages of employee (RM)` / `Median monthly salaries & wages of employees (RM)`
+  ) %>%
+  select(`Age group`, Gap, Skew_Ratio)
+
+print(df_skew)
+
+ggplot(df_skew, aes(x = `Age group`, y = Gap)) +
+  geom_bar(stat = "identity", fill = "orange") +
+  labs(title = "Mean - Median Salary Gap by Age Group (2010)",
+       x = "Age Group", y = "Gap (RM)") +
+  theme_minimal()
+```
+
+### Salary Distribution
+
+```{r}
+df_income <- df_income %>%
+  mutate(Sex = factor(Sex, levels = c("Male", "Female")))
+
+# Create the plot with improved colors and reordered levels
+salary_plot <- df_income %>%
+  ggplot(aes(x = factor(Age), y = Salary, fill = Sex)) +
+  geom_col(
+    position = position_dodge(width = 0.9),
+    alpha = 0.8
+  ) + 
+  scale_fill_manual(
+    values = c("#29B6F6", "#E57373"), # Distinct and attractive colors: Blue for Male, Orange for Female
+    name = "Gender"
+  ) +
+  labs(
+    title = "Salary Distribution by Age and Gender",
+    x = "Age",
+    y = "Salary",
+    fill = "Gender"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),  # Rotate x-axis labels
+    legend.position = "top",
+    panel.grid.major.y = element_line(color = "gray80"),  # Add vertical gridlines
+    panel.grid.minor.y = element_blank(),  # Remove minor gridlines
+    axis.ticks.x = element_line(size = 0.5),  # Adjust x-axis tick size
+    axis.ticks.length = unit(5, "points")  # Adjust tick length
+  ) +
+  scale_x_discrete(
+    breaks = seq(min(as.numeric(df_income$Age)), max(as.numeric(df_income$Age)), by = 5)  # Show every 5th age label
+  )
+
+salary_plot
+```
+
+### Enriched Data
+
+```{r}
+household_size_data <- data.frame(
+  year = c(1980, 1991, 2000, 2010, 2016),
+  household_size = c(5.2, 4.9, 4.6, 4.3, 4.1)
+)
+
+# Interpolate household size for all years from 1980 to 2022
+all_years <- 1980:2022
+interpolated_household_size <- approx(household_size_data$year, household_size_data$household_size,
+                                      xout = all_years, rule = 2)  # rule=2 allows extrapolation
+
+# Create a new dataframe with interpolated household size
+household_size_interpolated <- data.frame(
+  year = interpolated_household_size$x,
+  household_size = interpolated_household_size$y
+)
+
+glimpse(household_size_interpolated)
+```
+
+```{r}
+df_employment$year <- as.numeric(df_employment$year)
+names(df_employment)[names(df_employment) == "total labour force ('000)"] <- "total_labour_force"
+names(df_employment)[names(df_employment) == "employed ('000)"] <- "employed"
+names(df_employment)[names(df_employment) == "unemployed ('000)"] <- "unemployed"
+
+# Multiply relevant columns by 1000
+df_employment$total_labour_force <- df_employment$total_labour_force * 1000
+df_employment$employed <- df_employment$employed * 1000
+df_employment$unemployed <- df_employment$unemployed * 1000
+
+# Interpolate + extrapolate each column
+years <- 1980:2022
+interpolated_employment <- data.frame(
+  year = years,
+  total_labour_force = approx(df_employment$year, df_employment$total_labour_force, xout = years, rule = 2)$y,
+  employed = approx(df_employment$year, df_employment$employed, xout = years, rule = 2)$y,
+  unemployed = approx(df_employment$year, df_employment$unemployed, xout = years, rule = 2)$y
+)
+
+glimpse(interpolated_employment)
+```
+
+```{r}
+# Interpolation for missing values
+years <- 1980:2022
+interpolated_household_income <- data.frame(
+  date = as.Date(paste(years, "-01-01", sep = "")),
+  household_income_mean = approx(household_income$date, household_income$income_mean, xout = as.numeric(as.Date(paste(years, "-01-01", sep = ""))))$y,
+  household_income_median = approx(household_income$date, household_income$income_median, xout = as.numeric(as.Date(paste(years, "-01-01", sep = ""))))$y
+)
+interpolated_household_income
+
+glimpse(interpolated_household_income)
+```
+
+```{r}
+# Convert 'date' in interpolated_household_income to numeric year
+interpolated_household_income$year <- as.numeric(format(interpolated_household_income$date, "%Y"))
+
+# Merge on 'Year'
+merged_household <- merge(interpolated_household_income, household_size_interpolated, by = "year")
+merged_data <- merge(merged_household, interpolated_employment[, c("year", "employed", "total_labour_force")], by = "year", all.x = TRUE)
+
+# Calculate estimated individual income
+merged_data$estimated_individual_income_median <- merged_data$household_income_median / merged_data$household_size
+merged_data$estimated_individual_income_mean <- merged_data$household_income_mean / merged_data$household_size
+
+merged_data$estimated_wage <- merged_data$estimated_individual_income_mean * (merged_data$total_labour_force / merged_data$employed)
+
+
+# View merged data
+glimpse(merged_data)
+```
+
+```{r}
+# Plot estimated wage over time (by date)
+ggplot(merged_data, aes(x = date)) +
+  geom_line(aes(y = estimated_wage, color = "Wage"), size = 1.2) +
+  labs(title = "Wage Over Time (Initial)",
+       x = "Year", y = "Wage (RM)",) +
+  theme_minimal()
+```
+
+```{r}
+# Ensure df_wage_long columns are lowercase
+colnames(df_wage_long) <- tolower(colnames(df_wage_long))
+
+# Extract only mean wages
+df_total_only_mean <- df_wage_long %>%
+  filter(tolower(as.character(metric)) == "mean_wage") %>%
+  select(year, wage)
+
+# Ensure merged_data_mean also has lowercase column names
+colnames(merged_data) <- tolower(colnames(merged_data))
+merged_data_mean <- merged_data[, c("year", "estimated_wage")]
+
+# Merge the two datasets on 'year'
+comparison_data <- merge(merged_data_mean, df_total_only_mean, by = "year")
+```
+
+```{r}
+# Merge the two datasets on Year
+comparison_data <- merge(merged_data_mean, df_total_only_mean, by = "year")
+
+# Plot comparison of mean income and mean salary over the years
+ggplot(comparison_data, aes(x = year)) +
+  geom_line(aes(y = estimated_wage, color = "Estimated Wage (Mean)"), size = 1.2) +
+  geom_line(aes(y = wage, color = "Mean Wage (RM)"), size = 1.2) +
+  labs(title = "Comparison of Estimated and Actual Wage",
+       x = "Year", y = "Wage (RM)",
+       color = "Metric") +
+  theme_minimal()
+```
+
+```{r}
+# The estimated wage differs from the actual wage due to the formula used, which adjusts household income by the labor force ratio
+# To improve accuracy, we apply a linear model to adjust the estimated income based on  actual salary data, aligning the predictions more closely with real wages.
+
+# Apply linear model
+fit <- lm(wage ~ estimated_wage, data = comparison_data)
+merged_data$estimated_wage_adjusted <- predict(fit, newdata = merged_data)
+
+# Create adjusted_data with all years from merged_data (including before 2010)
+adjusted_data <- merged_data[, c("year", "estimated_wage_adjusted")]
+
+# Optional: Left join with df_total_only_mean to include Salary where available
+adjusted_data <- merge(adjusted_data, df_total_only_mean, by = "year", all.x = TRUE)
+
+# Drop the Salary column
+adjusted_data <- adjusted_data[, c("year", "estimated_wage_adjusted")]
+
+# View the cleaned adjusted_data
+adjusted_data
+```
+
+```{r}
+head(adjusted_data)
+str(adjusted_data)
+```
+
+```{r}
+# Separate adjusted_data into two parts: before 2010 and after 2010
+adjusted_data_before_2010 <- adjusted_data[adjusted_data$year < 2010, ]
+adjusted_data_after_2010 <- adjusted_data[adjusted_data$year >= 2010, ]
+
+# Convert year column in df_total_only_mean to numeric
+df_total_only_mean$year <- as.numeric(as.character(df_total_only_mean$year))
+
+# If the column names are different, rename the columns of df_total_only_mean to match adjusted_data
+colnames(df_total_only_mean) <- colnames(adjusted_data)
+
+# Combine the data
+final_wage_data <- rbind(adjusted_data_before_2010, df_total_only_mean)
+colnames(final_wage_data)[colnames(final_wage_data) == "estimated_wage_adjusted"] <- "wage"
+# Convert 'Year' to numeric
+final_wage_data$year <- as.numeric(final_wage_data$year)
+
+
+# View the combined data
+final_wage_data
+
+```
+
+```{r}
+# Define file path
+file_path <- "datasets/final_wage.csv"
+
+# Write CSV only if it doesn't exist
+if (!file.exists(file_path)) {
+  write.csv(final_wage_data, file_path, row.names = FALSE)
+}
+
+# Read the CSV regardless of whether it was just written or already exists
+final_wage_data <- readr::read_csv(file_path)
+```
+
+### Correlation Analysis
+
+```{r}
+df_income <- read_csv("datasets/synthetic_income_data.csv")
+
+df_income <- df_income %>%
+  mutate(Sex = factor(Sex, levels = c("Male", "Female")))
+
+set.seed(10303)
+income_split <- df_income  |>  initial_split(prop=0.7, strata = Salary)
+income_train <- income_split  |>  training()
+income_test <- income_split  |>  testing()
+```
+
+```{r}
+blueprint <- recipe(Salary ~ Age + Sex, data = income_train) |>
+  step_dummy(all_nominal_predictors())
+
+prepare <- prep(blueprint, training = income_train)
+
+baked_train <- bake(prepare, new_data = income_train) 
+baked_test <- bake(prepare, new_data = income_test) 
+
+
+# Split data by Gender
+income_train_female <- income_train %>% filter(Sex == "Female") %>% select(-ID)
+income_train_male <- income_train %>% filter(Sex == "Male") %>% select(-ID)
+
+# Plot pairwise correlations for females with a title
+female_plot <- ggpairs(
+  income_train_female %>% select(where(is.numeric))
+) +
+  ggtitle("Correlation between Salary and Age (Female)") +
+  theme(plot.title = element_text(hjust = 0.5, size = 16))
+
+# Plot pairwise correlations for males with a title
+male_plot <- ggpairs(
+  income_train_male %>% select(where(is.numeric))
+) +
+  ggtitle("Correlation between Salary and Age (Male)") +
+  theme(plot.title = element_text(hjust = 0.5, size = 16))
+
+# Display the plots
+female_plot
+male_plot
+```
+
+## Investment
+
+```{r}
+# Ensure Value is numeric
+df_epf_data$Value <- as.numeric(df_epf_data$Value)
+
+# Get unique items
+unique_items <- unique(df_epf_data$Items)
+
+# Loop through each item and generate a plot
+for (item_name in unique_items) {
+  # Filter data for the current item
+  df_filtered <- df_epf_data %>% filter(Items == item_name)
+
+  # Create plot
+  p <- ggplot(df_filtered, aes(x = Year, y = Value, color = interaction(`Sub Item Level 1`, `Sub Item Level 2`))) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Trend for:", item_name),
+      x = "Year",
+      y = "Value (RM million)",
+      color = "Sub-Items"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "bottom",
+      legend.title = element_text(size = 10),
+      legend.text = element_text(size = 8),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title = element_text(hjust = 0.5),
+      plot.margin = margin(10, 10, 20, 10)
+    ) +
+    guides(color = guide_legend(ncol = 2))
+
+  # Save the plot
+  filename <- paste0("epf_plot_", gsub("[^a-zA-Z0-9]", "_", item_name), ".png")
+  ggsave(filename, plot = p, width = 10, height = 6, dpi = 300)
+
+  # Optional: also print if needed
+  print(p)
+}
+```
+
+# Time Series Forecasts
+
+## Wage Growth
+
+```{r}
+# Convert wage data to time series
+ts_wage <- ts(final_wage_data$wage,
+                start = min(final_wage_data$year),
+                end = max(final_wage_data$year),
+                frequency = 1)
+
+# Define training and testing
+train_wage <- window(ts_wage, end = 2013)
+test_wage <- window(ts_wage, start = 2014)
+
+length_train_wage <- length(train_wage)
+length_test_wage <- length(test_wage)
+```
+
+```{r}
+autoplot(ts_wage) +
+  autolayer(train_wage, series = "Train") +
+  autolayer(test_wage, series = "Test") +
+  labs(title = "Mean Wage in Malaysia",
+       x = "Year", y = "Wage (RM)") +
+  scale_color_manual(values = c("Train" = "blue", "Test" = "red")) +
+  theme_minimal()
+```
+
+```{r}
+train_wage |> ggtsdisplay(main = "Data before BCT and Differencing")
+```
+
+```{r}
+lambda_wage <- train_wage |> BoxCox.lambda()
+print(lambda_wage)
+train_wage |> ndiffs()
+```
+
+```{r}
+first_diff <- train_wage |> diff()
+ggtsdisplay(first_diff, main = "Data after First Differencing")
+```
+
+```{r}
+second_diff <- first_diff |> diff()
+ggtsdisplay(second_diff, main = "Data after Second Differencing")
+```
+
+### ARIMA Model
+
+```{r}
+wage_arima <- Arima(train_wage,order = c(2,2,1), seasonal = c(0,0,0),
+                     include.constant = F)
+checkresiduals(wage_arima)
+```
+
+```{r}
+fcast_wage_arima <- forecast(wage_arima, h = length_test_wage)
+autoplot(ts_wage, series = "Data") +
+  autolayer(fcast_wage_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("RM") +
+  ggtitle("Wage Forecast")
+```
+
+### Auto ARIMA Model
+
+```{r}
+wage_auto_arima <- auto.arima(train_wage)
+checkresiduals(wage_auto_arima)
+```
+
+```{r}
+fcast_wage_auto_arima <- forecast(wage_auto_arima, h = length_test_wage)
+
+autoplot(ts_wage, series = "Data") +
+  autolayer(fcast_wage_auto_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("RM") +
+  ggtitle("Auto ARIMA Model: Wage Forecast")
+```
+
+### ETS Model
+
+```{r}
+wage_ets <- ets(train_wage, model = "MAN", damped = TRUE)
+checkresiduals(wage_ets)
+```
+
+```{r}
+fcast_wage_ets <- wage_ets %>%
+  forecast(h = length_test_wage)
+
+autoplot(ts_wage, series = "Data") +
+  autolayer(fcast_wage_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("RM") +
+  ggtitle("Wage Forecast")
+```
+
+### Auto ETS Model
+
+```{r}
+wage_auto_ets <- ets(train_wage)
+checkresiduals(wage_auto_ets)
+```
+
+```{r}
+# Fit the Auto ETS model explicitly with model = "ZZZ" and damped = NULL
+wage_auto_ets <- ets(train_wage, model = "ZZZ", damped = NULL)
+
+# Print the selected ETS model to understand what was chosen
+print(wage_auto_ets$method)
+
+# Forecast using the Auto ETS model
+fcast_wage_auto_ets <- wage_auto_ets |>
+  forecast(h = length_test_wage)
+
+autoplot(ts_wage, series = "Data") +
+  autolayer(fcast_wage_auto_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("RM") +
+  ggtitle("Auto ETS Model: Wage Forecast")
+```
+
+### Model Comparison
+
+```{r}
+summary(fcast_wage_arima)
+summary(fcast_wage_auto_arima)
+summary(fcast_wage_ets)
+summary(fcast_wage_auto_ets)
+```
+
+```{r}
+forecast::accuracy(fcast_wage_arima, test_wage)
+forecast::accuracy(fcast_wage_auto_arima, test_wage)
+forecast::accuracy(fcast_wage_auto_ets, test_wage)
+```
+
+```{r}
+#Modern accuracy of ARIMA Model
+wage_arima_function <- function(y,h) {
+  Arima(y, order = c(2,2,1), seasonal = c(0,0,0), include.constant = F) |> forecast(h=h)
+}
+
+wage_arima_function_cs <-
+  tsCV(ts_wage, forecastfunction = wage_arima_function , h=10)
+
+(mean(wage_arima_function_cs ^2, na.rm = T))
+colMeans(wage_arima_function_cs ^2, na.rm = T)
+
+
+# Modern accuracy of Auto ARIMA Model for wage
+wage_autoarima_function <- function(y, h) {
+  forecast(auto.arima(y, seasonal = FALSE), h = h)
+}
+
+wage_autoarima_function_cs <-
+  tsCV(ts_wage, forecastfunction = wage_autoarima_function, h = 10)
+
+# Mean Squared Error
+mean(wage_autoarima_function_cs^2, na.rm = TRUE)
+colMeans(wage_autoarima_function_cs^2, na.rm = TRUE)
+```
+
+### Champion Model: Auto ARIMA Model
+
+```{r}
+# Fit Auto ARIMA model
+fcast_fit_wage_auto_arima <- auto.arima(ts_wage)
+
+# Forecast the next 20 periods
+champion_fcast_wage_auto_arima <- forecast(fcast_fit_wage_auto_arima, h = 20)
+
+# Plot the data and forecast
+autoplot(ts_wage, series = "Data") +
+  autolayer(champion_fcast_wage_auto_arima, series = "Wage Forecast",
+            alpha = 0.5) +
+  ylab("RM") +
+  xlab("Year") +
+  ggtitle("20-Year Forecast of Wage in Malaysia")
+```
+
+## GDP Growth
+
+```{r}
+df_gdp_growth <- df_gdp_growth %>%
+  rename(`GDP growth` = `GDP growth (annual %)`)
+
+# Convert wage data to time series
+ts_gdp_growth <- ts(df_gdp_growth$`GDP growth`,
+                    start = min(df_gdp_growth$Year),
+                    end = max(df_gdp_growth$Year),
+                    frequency = 1)
+
+# Define training and testing
+train_gdp_growth <- window(ts_gdp_growth, end = 2013)
+test_gdp_growth <- window(ts_gdp_growth, start = 2014)
+
+length_train_gdp_growth <- length(train_gdp_growth)
+length_test_gdp_growth <- length(test_gdp_growth)
+```
+
+```{r}
+autoplot(ts_gdp_growth) +
+  autolayer(train_gdp_growth, series = "Train") +
+  autolayer(test_gdp_growth, series = "Test") +
+  labs(title = "GDP Growth in Malaysia",
+       x = "Year", y = "Growth (%)") +
+  scale_color_manual(values = c("Train" = "blue", "Test" = "red")) +
+  theme_minimal()
+```
+
+```{r}
+train_gdp_growth |> ggtsdisplay(main = "Data before BCT and Differencing")
+```
+
+```{r}
+lambda_gdp_growth <- train_gdp_growth |> BoxCox.lambda()
+print(lambda_gdp_growth)
+train_gdp_growth |> ndiffs()
+```
+
+```{r}
+first_diff <- train_gdp_growth |> diff()
+ggtsdisplay(first_diff, main = "Data after First Differencing")
+```
+
+### ARIMA Model
+
+```{r}
+gdp_growth_arima <- Arima(train_gdp_growth,order = c(2,1,1), seasonal = c(0,0,0),
+                     include.constant = F)
+checkresiduals(gdp_growth_arima)
+```
+
+```{r}
+fcast_gdp_growth_arima <- forecast(gdp_growth_arima, h = length_test_gdp_growth)
+autoplot(ts_gdp_growth, series = "Data") +
+  autolayer(fcast_gdp_growth_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Growth(%)") +
+  ggtitle("GDP Growth Forecast")
+```
+
+### Auto ARIMA Model
+
+```{r}
+gdp_growth_auto_arima <- auto.arima(train_gdp_growth)
+checkresiduals(gdp_growth_auto_arima)
+```
+
+```{r}
+fcast_gdp_growth_auto_arima <- forecast(gdp_growth_auto_arima, h = length_test_gdp_growth)
+
+autoplot(ts_gdp_growth, series = "Data") +
+  autolayer(fcast_gdp_growth_auto_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Growth(%)") +
+  ggtitle("Auto ARIMA Model: GDP Growth Forecast")
+```
+
+### ETS Model
+
+```{r}
+gdp_growth_ets <- ets(train_gdp_growth, model = "AAN", damped = FALSE)
+checkresiduals(gdp_growth_ets)
+```
+
+```{r}
+fcast_gdp_growth_ets <- gdp_growth_ets %>%
+  forecast(h = length_test_gdp_growth)
+
+autoplot(ts_gdp_growth, series = "Data") +
+  autolayer(fcast_gdp_growth_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Growth(%)") +
+  ggtitle("GDP Growth Forecast")
+```
+
+### Auto ETS Model
+
+```{r}
+gdp_growth_auto_ets <- ets(train_gdp_growth)
+checkresiduals(gdp_growth_auto_ets)
+```
+
+```{r}
+fcast_gdp_growth_auto_ets <- gdp_growth_auto_ets |>
+  forecast(h = length_test_gdp_growth)
+
+autoplot(ts_gdp_growth, series = "Data") +
+  autolayer(fcast_gdp_growth_auto_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Growth(%)") +
+  ggtitle("Auto ETS Model: GDP Growth Forecast")
+```
+
+### Model Comparison
+
+```{r}
+summary(fcast_gdp_growth_arima)
+summary(fcast_gdp_growth_auto_arima)
+summary(fcast_gdp_growth_ets)
+summary(fcast_gdp_growth_auto_ets)
+```
+
+```{r}
+forecast::accuracy(fcast_gdp_growth_arima, test_gdp_growth)
+forecast::accuracy(fcast_gdp_growth_auto_arima, test_gdp_growth)
+forecast::accuracy(fcast_gdp_growth_ets, test_gdp_growth)
+forecast::accuracy(fcast_gdp_growth_auto_ets, test_gdp_growth)
+```
+
+```{r}
+#Modern accuracy of ARIMA Model
+gdp_growth_arima_function <- function(y,h) {
+  Arima(y, order = c(2,1,1), seasonal = c(0,0,0), include.constant = F) |> forecast(h=h)
+}
+
+gdp_growth_arima_function_cs <-
+  tsCV(ts_gdp_growth, forecastfunction = gdp_growth_arima_function , h=10)
+
+(mean(gdp_growth_arima_function_cs ^2, na.rm = T))
+colMeans(gdp_growth_arima_function_cs ^2, na.rm = T)
+
+
+# Modern accuracy of ETS(A, A, N) Model
+gdp_growth_aan_function <- function(y, h) {
+  ets(y, model = "AAN") |> forecast(h = h)
+}
+
+gdp_growth_aan_function_cs <-
+  tsCV(ts_gdp_growth, forecastfunction = gdp_growth_aan_function, h = 10)
+
+# Mean Squared Error (overall)
+mean(gdp_growth_aan_function_cs^2, na.rm = TRUE)
+
+# Mean Squared Error (for each horizon step)
+colMeans(gdp_growth_aan_function_cs^2, na.rm = TRUE)
+```
+
+### Champion Model: ARIMA Model
+
+```{r}
+# Fit ARIMA(2,1,1) model
+fcast_fit_gdp_growth_arima <- Arima(ts_gdp_growth, order = c(2,1,1))
+
+# Forecast the next 20 periods
+champion_fcast_gdp_growth_arima <- forecast(fcast_fit_gdp_growth_arima, h = 20)
+
+# Plot the data and forecast
+autoplot(ts_gdp_growth, series = "Data") +
+  autolayer(champion_fcast_gdp_growth_arima, series = "GDP Growth Forecast",
+            alpha = 0.5) +
+  ylab("Growth(%)") +
+  xlab("Year") +
+  ggtitle("20-Year Forecast of GDP Growth in Malaysia (2024-2043)")
+```
+
+## Aging population forecast
+
+```{r}
+ts_aging <- ts(df_population_60$`60+`, start = 1970, end = 2024, frequency = 1)
+
+
+# training data, 25% test data
+train_aging  <- window(ts_aging, start = 1970, end = 2013)
+length_train_aging <- length(train_aging)
+test_aging <- window(ts_aging, start = 2014, end = 2024)
+length_test_aging  <- length(test_aging)
+
+autoplot(ts_aging) +
+  autolayer(train_aging, series="train") +
+  autolayer(test_aging, series="test") +
+  xlab("Year") + 
+  ylab("Aging Population ('000)") +
+  ggtitle("Aging population (60+) in Malaysia (1970-2024)") +
+  scale_color_manual(values=c("train"="blue", "test"="red")) +
+  guides(color=guide_legend(title="Series"))
+```
+
+```{r}
+yearly_changes <- diff(ts_aging)
+average_change <- mean(yearly_changes, na.rm = TRUE)
+print(round(average_change, 3))
+```
+
+```{r}
+train_aging |> ggtsdisplay(main = "Data before BCT and Differencing")
+```
+
+```{r}
+lambda_aging <- train_aging |> BoxCox.lambda()
+print(lambda_aging)
+train_aging |> ndiffs()
+```
+
+```{r}
+train_aging |> BoxCox(lambda = lambda_aging)|> diff() |> 
+  ggtsdisplay(main = "Data after BCT and Differencing")
+```
+
+### ARIMA Model
+
+```{r}
+aging_arima <- Arima(train_aging,order = c(1,1,1), seasonal = c(0,0,0),
+                     include.constant = T, lambda = lambda_aging)
+checkresiduals(aging_arima)
+```
+
+```{r}
+fcast_aging_arima <- forecast(aging_arima, h = length_test_aging)
+autoplot(ts_aging, series = "Data") + 
+  autolayer(fcast_aging_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Aging Population ('000)") + 
+  ggtitle("ARIMA Model: Aging Population (60+) Forecast")
+```
+
+### Auto ARIMA Model
+
+```{r}
+aging_auto_arima <- auto.arima(train_aging, lambda = lambda_aging) 
+checkresiduals(aging_auto_arima)
+```
+
+```{r}
+fcast_aging_auto_arima <- forecast(aging_auto_arima, h = length_test_aging)
+
+autoplot(ts_aging, series = "Data") + 
+  autolayer(fcast_aging_auto_arima, series ="Forecast", alpha = 0.5) + 
+  xlab("Year") +
+  ylab("Aging Population ('000)") + 
+  ggtitle("Auto ARIMA Model: Aging Population (60+) Forecast")
+```
+
+### ETS Model
+
+```{r}
+aging_ets <- ets(train_aging, model = "AAN", damped = TRUE, lambda = lambda_aging)
+checkresiduals(aging_ets)
+```
+
+```{r}
+fcast_aging_ets <- aging_ets %>% 
+  forecast(h = length_test_aging)
+
+autoplot(ts_aging, series = "Data") + 
+  autolayer(fcast_aging_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Aging Population ('000)") + 
+  ggtitle("ETS (A,Ad,N) Model: Aging Population (60+) Forecast")
+```
+
+### Auto ETS Model
+
+```{r}
+aging_auto_ets <- ets(train_aging, lambda = lambda_aging) 
+checkresiduals(aging_auto_ets)
+```
+
+```{r}
+fcast_aging_auto_ets <- aging_auto_ets |>  
+  forecast(h = length_test_aging)
+
+autoplot(ts_aging, series = "Data") + 
+  autolayer(fcast_aging_auto_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Aging Population ('000)") + 
+  ggtitle("Auto ETS Model: Aging Population (60+) Forecast")
+```
+
+### Model comparison
+
+```{r}
+summary(fcast_aging_arima)
+summary(fcast_aging_auto_arima)
+summary(fcast_aging_ets)
+summary(fcast_aging_auto_ets)
+```
+
+```{r}
+forecast::accuracy(fcast_aging_arima, test_aging)
+forecast::accuracy(fcast_aging_auto_arima, test_aging)
+forecast::accuracy(fcast_aging_ets, test_aging)
+forecast::accuracy(fcast_aging_auto_ets, test_aging)
+```
+
+```{r}
+aging_arima_function <- function(y,h) {
+  Arima(y, order = c(1,1,4), seasonal = c(0,0,0), include.constant = T,
+        lambda = lambda_aging) |> forecast(h=h)
+}
+
+aging_arima_function_cs <- 
+  tsCV(ts_aging, forecastfunction = aging_arima_function , h=10)
+
+(mean(aging_arima_function_cs ^2, na.rm = T)) 
+colMeans(aging_arima_function_cs ^2, na.rm = T)
+```
+
+```{r}
+aging_auto_arima_function <- function(y,h) {
+  auto.arima(y, lambda = lambda_aging) |> forecast(h=h)
+}
+
+aging_auto_arima_function_cs <- 
+  tsCV(ts_aging, forecastfunction = aging_auto_arima_function, h=10)
+
+(mean(aging_auto_arima_function_cs ^2, na.rm = T)) 
+colMeans(aging_auto_arima_function_cs ^2, na.rm = T)
+```
+
+### Champion Model: Auto ARIMA Model
+
+```{r}
+fcast_fit_aging <- auto.arima(ts_aging, lambda = lambda_aging)
+champion_fcast_aging <- forecast(fcast_fit_aging, h = 20)
+
+autoplot(ts_aging, series = "Data") + 
+  autolayer(champion_fcast_aging, series =  "Aging Population Forecast", 
+            alpha = 0.5) +
+  ylab("Aging Population ('000)") +
+  xlab("Year") +
+  ggtitle("20-Year Forecast of Aging Population (60+) in Malaysia (2025-2044)")
+```
+
+## Inflation forecast
+
+```{r}
+# Tidy the data for Malaysia
+df_inflation <- df_inflation %>%
+  filter(`Country Name` == "Malaysia") %>%  # Filter for Malaysia
+  select(`Country Name`, `Indicator Name`, `1960`:`2024`) %>%  # Select relevant columns
+  pivot_longer(cols = `1960`:`2024`, names_to = "Year", values_to = "Inflation") %>%  # Convert to long format
+  mutate(Year = as.numeric(Year),  # Convert Year to numeric
+         Inflation = as.numeric(Inflation))  # Convert Inflation to numeric
+```
+
+```{r}
+#create time series
+ts_inflation <- ts(df_inflation$Inflation, start = 1960, end = 2024, frequency = 1)
+
+# training data, 25% test data
+train_inflation  <- window(ts_inflation, start = 1960, end = 2010)
+length_train_inflation <- length(train_inflation)
+test_inflation <- window(ts_inflation, start = 2011, end = 2024)
+length_test_inflation  <- length(test_inflation)
+
+autoplot(ts_inflation) +
+  autolayer(train_inflation, series="train") +
+  autolayer(test_inflation, series="test") +
+  xlab("Year") + 
+  ylab("Inflation, consumer prices (annual %)") +
+  ggtitle("Inflation rate in Malaysia (1960-2024)") +
+  scale_color_manual(values=c("train"="blue", "test"="red")) +
+  guides(color=guide_legend(title="Series"))
+```
+
+```{r}
+train_inflation |> ggtsdisplay(main = "Data before BCT and Differencing")
+```
+
+```{r}
+lambda_inflation <- train_inflation |> BoxCox.lambda()
+print(lambda_inflation)
+train_inflation |> ndiffs()
+```
+
+```{r}
+train_inflation |> BoxCox(lambda = lambda_inflation)|> diff() |> 
+  ggtsdisplay(main = "Data after BCT and Differencing")
+```
+
+### ARIMA Model
+
+```{r}
+inflation_arima <- Arima(train_inflation,order = c(2,1,5), seasonal = c(0,0,0),
+                     include.constant = F, lambda = lambda_inflation)
+checkresiduals(inflation_arima)
+```
+
+```{r}
+fcast_inflation_arima <- forecast(inflation_arima, h = length_test_inflation)
+autoplot(ts_inflation, series = "Data") + 
+  autolayer(fcast_inflation_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Inflation, consumer prices (annual %)") + 
+  ggtitle("ARIMA Model: Forecast of Inflation rate in Malaysia")
+```
+
+### Auto ARIMA Model
+
+```{r}
+inflation_auto_arima <- auto.arima(train_inflation, lambda = lambda_inflation) 
+checkresiduals(inflation_auto_arima)
+
+#Model is not white noise
+```
+
+### ETS Model
+
+```{r}
+inflation_ets <- ets(train_inflation, model = "ANN", damped = FALSE, lambda = lambda_inflation)
+checkresiduals(inflation_ets)
+
+#Model is not white noise
+```
+
+### Auto ETS Model
+
+```{r}
+inflation_auto_ets <- ets(train_inflation, lambda = lambda_inflation) 
+checkresiduals(inflation_auto_ets)
+
+#same output as self-made ETS and model is not white noise
+```
+
+### Champion Model: ARIMA Model
+
+```{r}
+fcast_fit_inflation <- Arima(ts_inflation,order = c(2,1,5), seasonal = c(0,0,0),
+                     include.constant = F, lambda = lambda_inflation)
+champion_fcast_inflation <- forecast(fcast_fit_inflation, h = 20)
+
+autoplot(ts_inflation, series = "Data") + 
+  autolayer(champion_fcast_inflation, series =  "Inflation Forecast", 
+            alpha = 0.5) +
+  xlab("Year") +
+  ylab("Inflation, consumer prices (annual %)") + 
+  ggtitle("20-Year Forecast of Inflation Rate in Malaysia (2025-2044)")
+```
+
+## Unemployment forecast
+
+```{r}
+#create time series
+ts_unemployment <- ts(df_employment$`unemployment rate (%)`,
+                      start = 1982, end = 2023, frequency = 1)
+
+# training data, 25% test data
+train_unemployment  <- window(ts_unemployment, start = 1982, end = 2011)
+length_train_unemployment <- length(train_unemployment)
+test_unemployment <- window(ts_unemployment, start = 2012, end = 2023)
+length_test_unemployment  <- length(test_unemployment)
+
+autoplot(ts_unemployment) +
+  autolayer(train_unemployment, series="train") +
+  autolayer(test_unemployment, series="test") +
+  xlab("Year") + 
+  ylab("Unemployment rate (%)") +
+  ggtitle("Unemployment Rate in Malaysia (1982-2023)") +
+  scale_color_manual(values=c("train"="blue", "test"="red")) +
+  guides(color=guide_legend(title="Series"))
+```
+
+```{r}
+yearly_changes <- diff(ts_unemployment)
+average_change <- mean(yearly_changes, na.rm = TRUE)
+print(round(average_change, 4))
+```
+
+```{r}
+train_unemployment |> ggtsdisplay(main = "Data before BCT and Differencing")
+```
+
+```{r}
+lambda_unemployment <- train_unemployment |> BoxCox.lambda()
+print(lambda_unemployment)
+train_unemployment |> ndiffs()
+```
+
+```{r}
+train_unemployment |> diff() |> ggtsdisplay(main = "Data after Differencing")
+```
+
+### ARIMA Model
+
+```{r}
+unemployment_arima <- Arima(train_unemployment,order = c(1,1,1),
+                            seasonal = c(0,0,0),include.constant = T)
+checkresiduals(unemployment_arima)
+```
+
+```{r}
+fcast_unemployment_arima <- forecast(unemployment_arima,
+                                     h = length_test_unemployment)
+autoplot(ts_unemployment, series = "Data") + 
+  autolayer(fcast_unemployment_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Unemployment rate (%)") +
+  ggtitle("Unemployment Rate in Malaysia (1982-2023)")
+```
+
+### Auto ARIMA Model
+
+```{r}
+unemployment_auto_arima <- auto.arima(train_unemployment) 
+checkresiduals(unemployment_auto_arima)
+
+#Model is not white noise
+```
+
+### ETS Model
+
+```{r}
+unemployment_ets <- ets(train_unemployment, model = "MMN", damped = FALSE)
+checkresiduals(unemployment_ets)
+```
+
+```{r}
+fcast_unemployment_ets <- forecast(unemployment_ets,h = length_test_unemployment)
+
+autoplot(ts_unemployment, series = "Data") + 
+  autolayer(fcast_unemployment_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Unemployment rate (%)") +
+  ggtitle("Unemployment Rate in Malaysia (1982-2023)")
+```
+
+### Auto ETS Model
+
+```{r}
+unemployment_auto_ets <- ets(train_unemployment) 
+checkresiduals(unemployment_auto_ets)
+```
+
+```{r}
+fcast_unemployment_auto_ets <- forecast(unemployment_auto_ets,
+                                        h = length_test_unemployment)
+
+autoplot(ts_unemployment, series = "Data") + 
+  autolayer(fcast_unemployment_auto_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") +
+  ylab("Unemployment rate (%)") +
+  ggtitle("Unemployment Rate in Malaysia (1982-2023)")
+```
+
+### Model Comparison
+
+```{r}
+summary(fcast_unemployment_arima)
+summary(fcast_unemployment_ets)
+summary(fcast_unemployment_auto_ets)
+```
+
+```{r}
+forecast::accuracy(fcast_unemployment_arima, test_unemployment)
+forecast::accuracy(fcast_unemployment_ets, test_unemployment)
+forecast::accuracy(fcast_unemployment_auto_ets, test_unemployment)
+```
+
+```{r}
+unemployment_arima_function <- function(y,h) {
+  Arima(y, order = c(1,1,1), seasonal = c(0,0,0), include.constant = T) |> 
+    forecast(h=h)
+}
+
+unemployment_arima_function_cs <- 
+  tsCV(ts_unemployment, forecastfunction = unemployment_arima_function , h=10)
+
+(mean(unemployment_arima_function_cs ^2, na.rm = T)) 
+colMeans(unemployment_arima_function_cs ^2, na.rm = T)
+```
+
+```{r}
+unemployment_ets_function <- function(y,h) {
+  ets(y, model = "MMN", damping = F) |> forecast(h = h)
+}
+
+unemployment_ets_function_cs <- 
+  tsCV(ts_unemployment, forecastfunction = unemployment_ets_function , h=10)
+
+(mean(unemployment_ets_function_cs ^2, na.rm = T)) 
+colMeans(unemployment_ets_function_cs ^2, na.rm = T)
+```
+
+```{r}
+unemployment_auto_ets_function <- function(y,h) {
+  ets(y) |> forecast(h = h)
+}
+
+unemployment_auto_ets_function_cs <- 
+  tsCV(ts_unemployment, forecastfunction = unemployment_auto_ets_function , h=10)
+
+(mean(unemployment_auto_ets_function_cs ^2, na.rm = T)) 
+colMeans(unemployment_auto_ets_function_cs ^2, na.rm = T)
+```
+
+### Champion Model: ARIMA Model
+
+```{r}
+fcast_fit_unemployment <- Arima(ts_unemployment,order = c(1,1,1),
+                                seasonal = c(0,0,0), include.constant = T)
+champion_fcast_unemployment <- forecast(fcast_fit_unemployment, h = 10)
+
+autoplot(ts_unemployment, series = "Data") + 
+  autolayer(champion_fcast_unemployment, series =  "Unemployment Forecast", 
+            alpha = 0.5) +
+  xlab("Year") +
+  ylab("Unemployment rate (%)") + 
+  ggtitle("10-Year Forecast of Unemployment Rate in Malaysia (2024-2033)")
+```
+
+## Mortality
+
+```{r}
+# Tidy the data for Male Mortality
+df_male_mortality <- df_male_mortality %>%
+  filter(`Country Name` == "Malaysia") %>%  # Filter for Malaysia
+  select(`Country Name`, `Indicator Name`, `1960`:`2023`) %>%  # Select relevant columns
+  pivot_longer(cols = `1960`:`2023`, names_to = "Year", values_to = "Mortality") %>%  # Convert to long format
+  mutate(Year = as.numeric(Year),  # Convert Year to numeric
+         Mortality = as.numeric(Mortality)/1000*100)  # Convert Mortality to numeric
+
+# Tidy the data for Female Mortality
+df_female_mortality <- df_female_mortality %>%
+  filter(`Country Name` == "Malaysia") %>%  # Filter for Malaysia
+  select(`Country Name`, `Indicator Name`, `1960`:`2023`) %>%  # Select relevant columns
+  pivot_longer(cols = `1960`:`2023`, names_to = "Year", values_to = "Mortality") %>%  # Convert to long format
+  mutate(Year = as.numeric(Year),  # Convert Year to numeric
+         Mortality = as.numeric(Mortality)/1000*100) # Convert Mortality to numeric
+```
+
+### Male Mortality
+
+```{r}
+#create time series
+ts_male_mortality <- ts(df_male_mortality$`Mortality`,
+                      start = 1960, end = 2023, frequency = 1)
+
+# training data, 25% test data
+train_male_mortality  <- window(ts_male_mortality, start = 1960, end = 2010)
+length_train_male_mortality <- length(train_male_mortality)
+test_male_mortality <- window(ts_male_mortality, start = 2011, end = 2023)
+length_test_male_mortality  <- length(test_male_mortality)
+
+autoplot(ts_male_mortality) +
+  autolayer(train_male_mortality, series="train") +
+  autolayer(test_male_mortality, series="test") +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("Male Mortality Rate (aged 15-60) in Malaysia (1960-2023)") +
+  scale_color_manual(values=c("train"="blue", "test"="red")) +
+  guides(color=guide_legend(title="Series"))
+```
+
+```{r}
+train_male_mortality |> ggtsdisplay(main = "Data before BCT and Differencing")
+```
+
+```{r}
+lambda_male_mortality <- train_male_mortality |> BoxCox.lambda()
+print(lambda_male_mortality)
+train_male_mortality |> ndiffs()
+```
+
+```{r}
+train_male_mortality |> diff() |> ggtsdisplay(main = "Data after Differencing")
+```
+
+#### ARIMA Model
+
+```{r}
+male_mortality_arima <- Arima(train_male_mortality,order = c(1,1,3),
+                            seasonal = c(0,0,0),include.constant = T)
+checkresiduals(male_mortality_arima)
+```
+
+```{r}
+fcast_male_mortality_arima <- forecast(male_mortality_arima,
+                                     h = length_test_male_mortality)
+autoplot(ts_male_mortality, series = "Data") + 
+  autolayer(fcast_male_mortality_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("ARIMA Model: Forecast of Male Mortality Rate in Malaysia")
+```
+
+#### Auto ARIMA Model
+
+```{r}
+male_mortality_auto_arima <- auto.arima(train_male_mortality) 
+checkresiduals(male_mortality_auto_arima)
+
+#Model is not white noise
+```
+
+#### ETS Model
+
+```{r}
+male_mortality_ets <- ets(train_male_mortality, model = "MMN", damped = TRUE)
+checkresiduals(male_mortality_ets)
+
+#Model is not white noise
+```
+
+#### Auto ETS Model
+
+```{r}
+male_mortality_auto_ets <- ets(train_male_mortality) 
+checkresiduals(male_mortality_auto_ets)
+
+#Model is not white noise
+```
+
+#### Champion Model: ARIMA Model
+
+```{r}
+fcast_fit_male_mortality <- Arima(ts_male_mortality ,order = c(1,1,3),
+                                  seasonal = c(0,0,0), include.constant = T)
+champion_fcast_male_mortality  <- forecast(fcast_fit_male_mortality, h = 20)
+
+autoplot(ts_male_mortality, series = "Data") + 
+  autolayer(champion_fcast_male_mortality, series =  "Male mortality forecast", 
+            alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("20-Year Forecast of Male Mortality Rate (aged 15-60) in Malaysia (2024-2043)")
+
+#Bad forecast due to structural break
+```
+
+```{r}
+#Accouting for structural breaks
+df_male_mortality_sb <- df_male_mortality
+male_pre_pandemic <- df_male_mortality_sb[df_male_mortality_sb$Year <= 2020, ]
+
+male_differences <- diff(male_pre_pandemic$Mortality)
+male_avg_decrease <- mean(male_differences, na.rm = TRUE)
+male_final_year <- male_pre_pandemic$Mortality[nrow(male_pre_pandemic)]
+
+male_predicted_2021 <- male_final_year + male_avg_decrease * 1
+male_predicted_2022 <- male_final_year + male_avg_decrease * 2
+
+df_male_mortality_sb$Mortality[df_male_mortality_sb$Year == 2021] <- male_predicted_2021
+df_male_mortality_sb$Mortality[df_male_mortality_sb$Year == 2022] <- male_predicted_2022
+
+#Update time series
+ts_male_mortality_sb <- ts(df_male_mortality_sb$`Mortality`,
+                      start = 1960, end = 2023, frequency = 1)
+```
+
+```{r}
+yearly_changes <- diff(ts_male_mortality_sb)
+average_change <- mean(yearly_changes, na.rm = TRUE)
+print(round(average_change, 4))
+```
+
+```{r}
+fcast_fit_male_mortality <- Arima(ts_male_mortality_sb, order = c(1,1,3),
+                                  seasonal = c(0,0,0), include.constant = T)
+champion_fcast_male_mortality  <- forecast(fcast_fit_male_mortality, h = 20)
+
+autoplot(ts_male_mortality, series = "Data") + 
+  autolayer(champion_fcast_male_mortality, series =  "Male mortality forecast", 
+            alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("20-Year Forecast of Male Mortality Rate (aged 15-60) in Malaysia (2024-2043)")
+
+#Looks better!
+```
+
+### Female Mortality
+
+```{r}
+#create time series
+ts_female_mortality <- ts(df_female_mortality$`Mortality`,
+                      start = 1960, end = 2023, frequency = 1)
+
+# training data, 25% test data
+train_female_mortality  <- window(ts_female_mortality, start = 1960, end = 2010)
+length_train_female_mortality <- length(train_female_mortality)
+test_female_mortality <- window(ts_female_mortality, start = 2011, end = 2023)
+length_test_female_mortality  <- length(test_female_mortality)
+
+autoplot(ts_female_mortality) +
+  autolayer(train_female_mortality, series="train") +
+  autolayer(test_female_mortality, series="test") +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("Female Mortality Rate (aged 15-60) in Malaysia (1960-2023)") +
+  scale_color_manual(values=c("train"="blue", "test"="red")) +
+  guides(color=guide_legend(title="Series"))
+```
+
+```{r}
+yearly_changes <- diff(ts_female_mortality)
+average_change <- mean(yearly_changes, na.rm = TRUE)
+print(round(average_change, 4))
+```
+
+```{r}
+train_female_mortality |> ggtsdisplay(main = "Data before BCT and Differencing")
+```
+
+```{r}
+lambda_female_mortality <- train_female_mortality |> BoxCox.lambda()
+print(lambda_female_mortality)
+train_female_mortality |> ndiffs()
+```
+
+```{r}
+train_female_mortality |> diff() |> ggtsdisplay(main = "Data after Differencing")
+```
+
+#### ARIMA Model
+
+```{r}
+female_mortality_arima <- Arima(train_female_mortality,order = c(1,1,4),
+                            seasonal = c(0,0,0),include.constant = T)
+checkresiduals(female_mortality_arima)
+```
+
+```{r}
+fcast_female_mortality_arima <- forecast(female_mortality_arima,
+                                     h = length_test_female_mortality)
+autoplot(ts_female_mortality, series = "Data") + 
+  autolayer(fcast_female_mortality_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("ARIMA Model: Forecast of Male Mortality Rate in Malaysia")
+```
+
+#### Auto ARIMA Model
+
+```{r}
+female_mortality_auto_arima <- auto.arima(train_female_mortality) 
+checkresiduals(female_mortality_auto_arima)
+
+#Model is not white noise
+```
+
+#### ETS Model
+
+```{r}
+female_mortality_ets <- ets(train_female_mortality, model = "MMN", damped = TRUE)
+checkresiduals(female_mortality_ets)
+```
+
+```{r}
+fcast_female_mortality_ets <- forecast(female_mortality_ets,
+                                     h = length_test_female_mortality)
+autoplot(ts_female_mortality, series = "Data") + 
+  autolayer(fcast_female_mortality_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("ETS Model: Forecast of Male Mortality Rate in Malaysia")
+```
+
+#### Auto ETS Model
+
+```{r}
+female_mortality_auto_ets <- ets(train_female_mortality) 
+checkresiduals(female_mortality_auto_ets)
+
+#Model is not white noise
+```
+
+#### Model Comparison
+
+```{r}
+summary(fcast_female_mortality_arima)
+summary(fcast_female_mortality_ets)
+```
+
+```{r}
+forecast::accuracy(fcast_female_mortality_arima, test_female_mortality)
+forecast::accuracy(fcast_female_mortality_ets, test_female_mortality)
+```
+
+```{r}
+#Modern accuracy of ARIMA Model
+female_mortality_arima_function <- function(y,h) {
+  Arima(y, order = c(1,1,4), seasonal = c(0,0,0), include.constant = T) |> 
+    forecast(h=h)
+}
+
+female_mortality_arima_function_cs <- 
+  tsCV(ts_female_mortality, forecastfunction = female_mortality_arima_function, h=10)
+
+(mean(female_mortality_arima_function_cs ^2, na.rm = T)) 
+colMeans(female_mortality_arima_function_cs ^2, na.rm = T)
+
+
+#Modern accuracy of ETS Model
+female_mortality_ets_function <- function(y,h) {
+  ets(y, model = "MMN", damping = T) |> forecast(h = h)
+}
+
+female_mortality_ets_function_cs <- 
+  tsCV(ts_female_mortality, forecastfunction = female_mortality_ets_function , h=10)
+
+(mean(female_mortality_ets_function_cs ^2, na.rm = T)) 
+colMeans(female_mortality_ets_function_cs ^2, na.rm = T)
+```
+
+#### Champion Model: ARIMA Model
+
+```{r}
+fcast_fit_female_mortality <- Arima(ts_female_mortality ,order = c(1,1,4),
+                                  seasonal = c(0,0,0), include.constant = T)
+champion_fcast_female_mortality  <- forecast(fcast_fit_female_mortality, h = 20)
+
+autoplot(ts_female_mortality, series = "Data") + 
+  autolayer(champion_fcast_female_mortality, series =  "Female mortality forecast", 
+            alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("20-Year Forecast of Female Mortality Rate (aged 15-60) in Malaysia (2024-2043)")
+```
+
+### Grouped Forecast
+
+```{r}
+autoplot(ts_male_mortality, series = "Male Mortality Data") + 
+  autolayer(ts_female_mortality, series = "Female Mortality Data") +
+  autolayer(champion_fcast_male_mortality, series = "Male Mortality Forecast",
+            alpha = 0.7, PI = F) +
+  autolayer(champion_fcast_female_mortality, series = "Female Mortality Forecast",
+            alpha = 0.7, PI = F) +
+  xlab("Year") + 
+  ylab("Mortality rate (%)") +
+  ggtitle("20-Year Forecast of Mortality Rates (aged 15-60) in Malaysia (2024-2043)") +
+  scale_color_manual(values = c("blue", "green", "black", "red"),
+                      labels = c("Female Mortality Data", "Female Mortality Forecast",
+                                 "Male Mortality Data", "Male Mortality Forecast")) 
+```
+
+## Fertility
+
+```{r}
+# Tidy the data for Malaysia
+df_fertility <- df_fertility %>%
+  filter(`Country Name` == "Malaysia") %>%  # Filter for Malaysia
+  select(`Country Name`, `Indicator Name`, `1960`:`2023`) %>%  # Select relevant columns
+  pivot_longer(cols = `1960`:`2023`, names_to = "Year", values_to = "Fertility") %>%  # Convert to long format
+  mutate(Year = as.numeric(Year),  # Convert Year to numeric
+         Fertility = as.numeric(Fertility))  # Convert Inflation to numeric
+```
+
+```{r}
+#create time series
+ts_fertility <- ts(df_fertility$Fertility, start = 1960, end = 2023,
+                   frequency = 1)
+
+# training data, 25% test data
+train_fertility  <- window(ts_fertility, start = 1960, end = 2010)
+length_train_fertility <- length(train_fertility)
+test_fertility <- window(ts_fertility, start = 2011, end = 2023)
+length_test_fertility  <- length(test_fertility)
+
+autoplot(ts_fertility) +
+  autolayer(train_fertility, series="train") +
+  autolayer(test_fertility, series="test") +
+  xlab("Year") + 
+  ylab("Births per woman") +
+  ggtitle("Fertility Rate (births per woman) in Malaysia (1960-2023)") +
+  scale_color_manual(values=c("train"="blue", "test"="red")) +
+  guides(color=guide_legend(title="Series"))
+```
+
+```{r}
+yearly_changes <- diff(ts_fertility)
+average_change <- mean(yearly_changes, na.rm = TRUE)
+print(round(average_change, 4))
+```
+
+```{r}
+train_fertility |> ggtsdisplay(main = "Data before BCT and Differencing")
+```
+
+```{r}
+lambda_fertility <- train_fertility |> BoxCox.lambda()
+print(lambda_fertility)
+train_fertility |> ndiffs()
+```
+
+```{r}
+train_fertility |> BoxCox(lambda = lambda_fertility)|> diff() |> 
+  ggtsdisplay(main = "Data after BCT and Differencing")
+```
+
+### ARIMA Model
+
+```{r}
+fertility_arima <- Arima(train_fertility,order = c(1,1,2), seasonal = c(0,0,0),
+                         include.constant = T, lambda = lambda_fertility)
+checkresiduals(fertility_arima)
+```
+
+```{r}
+fcast_fertility_arima <- forecast(fertility_arima,
+                                     h = length_test_fertility)
+autoplot(ts_fertility, series = "Data") + 
+  autolayer(fcast_fertility_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Fertility rate (%)") +
+  ggtitle("Fertility Rate (births per woman) in Malaysia (1960-2023)")
+```
+
+### Auto ARIMA Model
+
+```{r}
+fertility_auto_arima <- auto.arima(train_fertility, lambda = lambda_fertility) 
+checkresiduals(fertility_auto_arima)
+```
+
+```{r}
+fcast_fertility_auto_arima <- forecast(fertility_auto_arima,
+                                     h = length_test_fertility)
+autoplot(ts_fertility, series = "Data") + 
+  autolayer(fcast_fertility_auto_arima, series ="Forecast", alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Fertility rate (%)") +
+  ggtitle("Fertility Rate (births per woman) in Malaysia (1960-2023)")
+```
+
+### ETS Model
+
+```{r}
+fertility_ets <- ets(train_fertility, model = "AAN",
+                            damped = TRUE, lambda = lambda_fertility)
+checkresiduals(fertility_ets)
+```
+
+```{r}
+fcast_fertility_ets <- forecast(fertility_ets,
+                                     h = length_test_fertility)
+autoplot(ts_fertility, series = "Data") + 
+  autolayer(fcast_fertility_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Fertility rate (%)") +
+  ggtitle("Fertility Rate (births per woman) in Malaysia (1960-2023)")
+```
+
+### Auto ETS Model
+
+```{r}
+fertility_auto_ets <- ets(train_fertility, lambda = lambda_fertility) 
+checkresiduals(fertility_auto_ets)
+```
+
+```{r}
+fcast_fertility_auto_ets <- forecast(fertility_auto_ets,
+                                     h = length_test_fertility)
+autoplot(ts_fertility, series = "Data") + 
+  autolayer(fcast_fertility_auto_ets, series ="Forecast", alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Fertility rate (%)") +
+  ggtitle("Fertility Rate (births per woman) in Malaysia (1960-2023)")
+```
+
+### Model comparison
+
+```{r}
+summary(fcast_fertility_arima)
+summary(fcast_fertility_auto_arima)
+summary(fcast_fertility_ets)
+summary(fcast_fertility_auto_ets)
+```
+
+```{r}
+forecast::accuracy(fcast_fertility_arima, test_fertility)
+forecast::accuracy(fcast_fertility_auto_arima, test_fertility)
+forecast::accuracy(fcast_fertility_ets, test_fertility)
+forecast::accuracy(fcast_fertility_auto_ets, test_fertility)
+```
+
+```{r}
+fertility_arima_function <- function(y,h) {
+  Arima(y, order = c(1,1,2), seasonal = c(0,0,0), include.constant = T,
+        lambda = lambda_fertility) |> forecast(h=h)
+}
+
+fertility_arima_function_cs <- 
+  tsCV(ts_fertility, forecastfunction = fertility_arima_function , h=10)
+
+(mean(fertility_arima_function_cs ^2, na.rm = T)) 
+colMeans(fertility_arima_function_cs ^2, na.rm = T)
+
+
+fertility_auto_arima_function <- function(y,h) {
+  auto.arima(y, lambda = lambda_fertility) |> forecast(h=h)
+}
+
+fertility_auto_arima_function_cs <- 
+  tsCV(ts_fertility, forecastfunction = fertility_auto_arima_function, h=10)
+
+(mean(fertility_auto_arima_function_cs ^2, na.rm = T)) 
+colMeans(fertility_auto_arima_function_cs ^2, na.rm = T)
+
+
+fertility_ets_function <- function(y,h) {
+  ets(y, model = "AAN", damping = T, lambda = lambda_fertility) |> forecast(h = h)
+}
+
+fertility_ets_function_cs <- 
+  tsCV(ts_fertility, forecastfunction = fertility_ets_function , h=10)
+
+(mean(fertility_ets_function_cs ^2, na.rm = T)) 
+colMeans(fertility_ets_function_cs ^2, na.rm = T)
+
+
+fertility_ets_auto_function <- function(y,h) {
+  ets(y, lambda = lambda_fertility) |> forecast(h = h)
+}
+
+fertility_ets_auto_function_cs <- 
+  tsCV(ts_fertility, forecastfunction = fertility_ets_auto_function , h=10)
+
+(mean(fertility_ets_auto_function_cs ^2, na.rm = T)) 
+colMeans(fertility_ets_auto_function_cs ^2, na.rm = T)
+```
+
+### Champion Model: ARIMA Model
+
+```{r}
+fcast_fit_fertility <- Arima(ts_fertility ,order = c(1,1,2),seasonal = c(0,0,0),
+                             include.constant = T, lambda = lambda_fertility)
+champion_fcast_fertility <- forecast(fcast_fit_fertility, h = 20)
+
+autoplot(ts_fertility, series = "Data") + 
+  autolayer(champion_fcast_fertility, series =  "Fertility forecast", 
+            alpha = 0.5) +
+  xlab("Year") + 
+  ylab("Fertility rate (%)") +
+  ggtitle("20-Year Forecast of Fertility Rate (births per woman) in Malaysia (2024-2043)")
+```
+
+# Regression
+
+## Feature engineering
+
+```{r}
+blueprint <- recipe(Salary ~ Age + Sex, data = income_train) |>
+  step_dummy(all_nominal_predictors())
+
+prepare <- prep(blueprint, training = income_train)
+
+baked_train <- bake(prepare, new_data = income_train) 
+baked_test <- bake(prepare, new_data = income_test) 
+```
+
+```{r}
+caret::nearZeroVar(income_train, saveMetrics= TRUE) %>% 
+  tibble::rownames_to_column() %>% 
+  filter(nzv)
+```
+
+```{r}
+vis_miss(df_income, sort = TRUE)
+```
+
+## Regression Models
+
+```{r}
+model_basic <- lm(Salary ~ ., data = baked_train)
+
+#non-linearity
+baked_train_nlr <- bake(prepare, new_data = income_train) 
+baked_train_nlr$Age <- (baked_train_nlr$Age)^2
+model_nlr <- lm(Salary ~ ., data = baked_train_nlr)
+
+broom::tidy(model_basic)
+broom::tidy(model_nlr)
+```
+
+## Model Comparison
+
+```{r}
+set.seed(10303)
+cv_model_basic <- train(Salary ~ ., data = baked_train, method = "lm",
+                        trControl = trainControl(method = "cv", number = 10)
+)
+
+set.seed(10303)
+cv_model_nlr <- train(Salary ~ ., data = baked_train_nlr, method = "lm",
+                        trControl = trainControl(method = "cv", number = 10)
+)
+
+calculate_aic_bic <- function(model) {
+  aic <- extractAIC(model$finalModel)[2]
+  bic <- BIC(model$finalModel)
+  return(list(AIC = aic, BIC = bic))
+}
+
+
+summary(resamples(list(model_basic = cv_model_basic, 
+                       model_nlr = cv_model_basic
+)))
+```
+
+```{r}
+calculate_aic_bic <- function(model) {
+  aic <- extractAIC(model$finalModel)[2]
+  bic <- BIC(model$finalModel)
+  return(list(AIC = aic, BIC = bic))
+}
+
+# Calculate AIC and BIC for each model
+aic_bic_model_basic <- calculate_aic_bic(cv_model_basic)
+aic_bic_model_nlr <- calculate_aic_bic(cv_model_nlr)
+
+print(aic_bic_model_basic)
+
+print(aic_bic_model_nlr)
+```
+
+```{r}
+metrics <- data.frame(
+  Model = c("model_basic", "model_nlr"),
+  RMSE_Mean = c(2432.976, 2432.976),  # Mean RMSE from resampling
+  MAE_Mean = c(1765.301, 1765.301),   # Mean MAE from resampling
+  Rsquared_Mean = c(0.09995947, 0.09995947),  # Mean R-squared from resampling
+  AIC = c(109155.5, 109293.5),        # AIC values for each model
+  BIC = c(129047.2, 129185.2)         # BIC values for each model
+)
+
+gt(metrics) %>%
+  cols_label(
+    Model = "Model",
+    RMSE_Mean = "RMSE",
+    MAE_Mean = "MAE",
+    Rsquared_Mean = "R-squared",
+    AIC = "AIC",
+    BIC = "BIC"
+  ) %>%
+  cols_align(
+    align = "center"
+  ) %>%
+  tab_options(
+    column_labels.background.color = "dimgrey",
+    column_labels.font.weight = "bold",
+    footnotes.font.size = "10px"
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "white"),
+      cell_text(color = "black"),
+      cell_borders(sides = "all", color = "black", weight = px(1))
+    ),
+    locations = cells_body()
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "lightgrey"),
+      cell_text(weight = "bold", color = "black"),
+      cell_borders(sides = "all", color = "black", weight = px(1))
+    ),
+    locations = cells_body(
+      columns = c(Model)
+    )
+  ) %>%
+  # Highlight the 'model_nlr' row in yellow
+  tab_style(
+    style = list(
+      cell_fill(color = "yellow")
+    ),
+    locations = cells_body(
+      rows = metrics$Model == "model_basic"
+    )
+  )
+```
+
+```{r}
+plot(model_basic)
+```
+
+## Champion Model: Basic Regression Model
+
+```{r}
+broom::tidy(model_basic)
+```
