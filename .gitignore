@@ -1,0 +1,24 @@
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.Rdata
+.RData
+.httr-oauth
+.Renviron
+
+# Quarto
+/.quarto/
+*_files/
+*_cache/
+*.html
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+*.swp
+
+# Generated plots
+epf_plot_*.png

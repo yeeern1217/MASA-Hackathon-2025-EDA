@@ -44,12 +44,12 @@ library(truncdist)
 ## Datasets by MASA
 
 ```{r}
-df_birth <- read_csv("datasets/birth.csv")
-df_employment <- read_csv("datasets/employment.csv")
-df_epf_contribution_rates <- read_csv("datasets/epf contribution rates.csv")
-df_epf_savings <- read_csv("datasets/epf savings.csv")
-df_population <- read_csv("datasets/population.csv")
-df_wage <- read_csv("datasets/wage.csv")
+df_birth <- read_csv("data/raw/birth.csv")
+df_employment <- read_csv("data/raw/employment.csv")
+df_epf_contribution_rates <- read_csv("data/raw/epf contribution rates.csv")
+df_epf_savings <- read_csv("data/raw/epf savings.csv")
+df_population <- read_csv("data/raw/population.csv")
+df_wage <- read_csv("data/raw/wage.csv")
 ```
 
 ## External Datasets
@@ -84,13 +84,13 @@ df_wage <- read_csv("datasets/wage.csv")
 </div>
 
 ```{r}
-household_income <-  read_csv("datasets/hh_income.csv")
-df_epf_data <-  read_csv("datasets/epf data.csv")
-df_gdp_growth <- read_csv("datasets/gdp growth.csv")
-df_inflation <- read_csv("datasets/inflation.csv", skip = 4)
-df_male_mortality <- read_csv("datasets/male mortality.csv", skip = 4)
-df_female_mortality <- read_csv("datasets/female mortality.csv", skip = 4)
-df_fertility <- read_csv("datasets/fertility.csv", skip = 4)
+household_income <-  read_csv("data/raw/hh_income.csv")
+df_epf_data <-  read_csv("data/raw/epf data.csv")
+df_gdp_growth <- read_csv("data/raw/gdp growth.csv")
+df_inflation <- read_csv("data/raw/inflation.csv", skip = 4)
+df_male_mortality <- read_csv("data/raw/male mortality.csv", skip = 4)
+df_female_mortality <- read_csv("data/raw/female mortality.csv", skip = 4)
+df_fertility <- read_csv("data/raw/fertility.csv", skip = 4)
 ```
 
 # Synthetic Income Data
@@ -255,7 +255,7 @@ print(salary_summary)
 
 ```{r}
 # Define file path
-file_path <- "datasets/synthetic_income_data.csv"
+file_path <- "data/processed/synthetic_income_data.csv"
 
 # Write CSV only if it doesn't exist
 if (!file.exists(file_path)) {
@@ -688,7 +688,7 @@ final_wage_data
 
 ```{r}
 # Define file path
-file_path <- "datasets/final_wage.csv"
+file_path <- "data/processed/final_wage.csv"
 
 # Write CSV only if it doesn't exist
 if (!file.exists(file_path)) {
@@ -702,7 +702,7 @@ final_wage_data <- readr::read_csv(file_path)
 ### Correlation Analysis
 
 ```{r}
-df_income <- read_csv("datasets/synthetic_income_data.csv")
+df_income <- read_csv("data/processed/synthetic_income_data.csv")
 
 df_income <- df_income %>%
   mutate(Sex = factor(Sex, levels = c("Male", "Female")))
